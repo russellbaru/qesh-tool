@@ -6,6 +6,21 @@
   <title>QESH Inspection Builder</title>
 
   <!--
+    Cache-busting meta tags. These tell most browsers not to cache the HTML
+    file aggressively, so when we push an update teammates don't get stuck
+    on a stale version that fails to load. Browsers vary in how strictly
+    they honor these — that's why we ALSO have the version check below in
+    the boot script. Belt and suspenders.
+
+    Important: this only affects the HTML file itself. The libraries we
+    load from esm.sh / unpkg / cdn.tailwindcss.com still cache normally,
+    which is what we want — those don't change between our deploys.
+  -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
+  <!--
     SINGLE-FILE QESH INSPECTION BUILDER
     ===================================
     No build step, no npm install, no Node.js required. Just open this file
@@ -315,6 +330,14 @@
       // The fixed client name shown in the top-right of the cover page.
       // Hardcoded because every report this app generates is for the same client.
       const CLIENT_NAME = 'SUNWAY INTEGRATED PROPERTIES SDN BHD';
+
+      // App version — bump this whenever you push an update.
+      // Shown in the header so teammates can quickly tell whether they're on
+      // the latest version. If their version doesn't match what you've shipped,
+      // ask them to hit Ctrl+Shift+R to force a fresh load.
+      //
+      // Just increment by 1 for each update (v1 → v2 → v3, etc.).
+      const APP_VERSION = '1';
 
       // ============================================================
       // DOCX GENERATION — calibrated against the real Sunway template
@@ -1184,7 +1207,11 @@
             <div className="max-w-5xl mx-auto flex items-center justify-between gap-4 flex-wrap">
               <div>
                 <h1 className="font-semibold text-lg text-gray-800">QESH Inspection Builder</h1>
-                <p className="text-xs text-gray-500">Draft saved locally · {formatTime(savedAt)}</p>
+                <p className="text-xs text-gray-500">
+                  Draft saved locally · {formatTime(savedAt)}
+                  <span className="ml-2 text-gray-300">·</span>
+                  <span className="ml-2 text-gray-400">v{APP_VERSION}</span>
+                </p>
               </div>
               <div className="flex items-center gap-2 text-sm">
                 <button onClick={onBackup} className="px-3 py-1.5 rounded border border-gray-300 bg-white hover:bg-gray-50">
