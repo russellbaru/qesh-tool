@@ -339,23 +339,30 @@
       // The actual template uses a content width of 7.28" (10490 DXA), not the
       // full 7.5" between margins. This leaves a small visual buffer on the
       // right edge that matches the original report.
+      // CONTENT_W is no longer used for table widths (we use percentages now,
+      // see column constants below) but we keep it for one thing: page-content
+      // calculations like image sizing if needed.
       const CONTENT_W = inch(7.28);
 
-      // Cover page logos: 1.92" / 5.36" — straight from the template.
-      const COL_LOGO_LEFT = inch(1.92);
-      const COL_LOGO_RIGHT = CONTENT_W - COL_LOGO_LEFT;
+      // ---- Column widths as percentages ----
+      // The tables are set to span 100% of the page width (margin-to-margin),
+      // and column widths are expressed as percentages so Word "AutoFits to
+      // window" automatically. This matches what the template does and avoids
+      // the right-side gap that fixed DXA widths produced.
+      //
+      // Numbers below come from the manually-fixed template you sent.
+      // (Total within each table sums to ~100; small rounding is fine — Word
+      // distributes any remainder.)
+      const COL_LOGO_LEFT_PCT  = 26.4;
+      const COL_LOGO_RIGHT_PCT = 73.6;
 
-      // Info table: 1.87" / 2.46" / 2.76" — measured from the template.
-      // (The original spec had different numbers; the template wins.)
-      const COL_INFO_DATE = inch(1.87);
-      const COL_INFO_PROJ = inch(2.46);
-      const COL_INFO_CONT = CONTENT_W - COL_INFO_DATE - COL_INFO_PROJ;
+      const COL_INFO_DATE_PCT = 28.3;
+      const COL_INFO_PROJ_PCT = 37.9;
+      const COL_INFO_CONT_PCT = 33.8;
 
-      // Findings table: 0.49" / 2.06" / 4.72" — measured from the template.
-      // (Spec said Work Activity was 1.87"; the template uses 2.06".)
-      const COL_FIND_NO = inch(0.49);
-      const COL_FIND_ACT = inch(2.06);
-      const COL_FIND_DESC = CONTENT_W - COL_FIND_NO - COL_FIND_ACT;
+      const COL_FIND_NO_PCT   = 7.0;
+      const COL_FIND_ACT_PCT  = 26.4;
+      const COL_FIND_DESC_PCT = 66.6;
 
       // Photo box: max 4.02" x 3.01" but aspect ratio is preserved (see
       // photoParagraph below — portrait photos stay portrait, fit-within).
@@ -389,10 +396,13 @@
         return new TextRun({ text, bold: !!opts.bold, italics: !!opts.italic, font: FONT, size: SIZE });
       }
       function emptyP() { return new Paragraph({ children: [new TextRun({ text: '', font: FONT, size: SIZE })] }); }
+      // cell() now takes width as a PERCENTAGE of the parent table width
+      // (e.g. 26.4 for 26.4%). Tables are set to 100% page width, so cell
+      // percentages distribute across the full page width margin-to-margin.
       function cell({ children, width, borders = ALL_BORDERS, shading, verticalAlign = VerticalAlign.TOP, columnSpan }) {
         const opts = {
           borders,
-          width: { size: width, type: WidthType.DXA },
+          width: { size: width, type: WidthType.PERCENTAGE },
           margins: { top: 80, bottom: 80, left: 120, right: 120 },
           verticalAlign,
           children: children && children.length ? children : [emptyP()]
@@ -400,6 +410,15 @@
         if (shading) opts.shading = shading;
         if (columnSpan) opts.columnSpan = columnSpan;
         return new TableCell(opts);
+      }
+
+      // Convenience: build a Table that spans 100% of page width.
+      // Wraps the rows config to keep table-construction code less repetitive.
+      function fullWidthTable(rows) {
+        return new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          rows
+        });
       }
 
       function formatDateLong(yyyymmdd) {
@@ -453,29 +472,25 @@
         // cell shows the hardcoded client name in bold. Note: the contractor
         // name from the form does NOT go here — that goes in the info table
         // below. The right side of the logo row is always the client.
-        const logoTable = new Table({
-          width: { size: CONTENT_W, type: WidthType.DXA },
-          columnWidths: [COL_LOGO_LEFT, COL_LOGO_RIGHT],
-          rows: [new TableRow({
-            height: { value: inch(1.0), rule: HeightRule.ATLEAST },
-            children: [
-              cell({ width: COL_LOGO_LEFT,
-                     verticalAlign: VerticalAlign.CENTER,
-                     children: [new Paragraph({
-                       alignment: AlignmentType.CENTER,
-                       spacing: { before: 0, after: 0 },
-                       children: [new ImageRun({
-                         data: COMPANY_LOGO_BYTES,
-                         transformation: { width: COMPANY_LOGO_W_PX, height: COMPANY_LOGO_H_PX },
-                         type: 'jpg'
-                       })]
-                     })] }),
-              cell({ width: COL_LOGO_RIGHT,
-                     verticalAlign: VerticalAlign.CENTER,
-                     children: [P({ text: CLIENT_NAME, bold: true, align: AlignmentType.CENTER })] }),
-            ]
-          })]
-        });
+        const logoTable = fullWidthTable([new TableRow({
+          height: { value: inch(1.0), rule: HeightRule.ATLEAST },
+          children: [
+            cell({ width: COL_LOGO_LEFT_PCT,
+                   verticalAlign: VerticalAlign.CENTER,
+                   children: [new Paragraph({
+                     alignment: AlignmentType.CENTER,
+                     spacing: { before: 0, after: 0 },
+                     children: [new ImageRun({
+                       data: COMPANY_LOGO_BYTES,
+                       transformation: { width: COMPANY_LOGO_W_PX, height: COMPANY_LOGO_H_PX },
+                       type: 'jpg'
+                     })]
+                   })] }),
+            cell({ width: COL_LOGO_RIGHT_PCT,
+                   verticalAlign: VerticalAlign.CENTER,
+                   children: [P({ text: CLIENT_NAME, bold: true, align: AlignmentType.CENTER })] }),
+          ]
+        })]);
 
         const title = new Paragraph({
           alignment: AlignmentType.CENTER,
@@ -502,14 +517,14 @@
         const infoRow1 = new TableRow({
           height: { value: inch(0.6), rule: HeightRule.ATLEAST },
           children: [
-            headerValueCell(COL_INFO_DATE, 'INSPECTION DATE:', formatDateLong(inspectionDate)),
-            headerValueCell(COL_INFO_PROJ, 'PROJECT:',         projectName || ''),
-            headerValueCell(COL_INFO_CONT, 'CONTRACTORS:',     contractorName || ''),
+            headerValueCell(COL_INFO_DATE_PCT, 'INSPECTION DATE:', formatDateLong(inspectionDate)),
+            headerValueCell(COL_INFO_PROJ_PCT, 'PROJECT:',         projectName || ''),
+            headerValueCell(COL_INFO_CONT_PCT, 'CONTRACTORS:',     contractorName || ''),
           ]
         });
         const descRow = new TableRow({
           children: [cell({
-            width: CONTENT_W, columnSpan: 3,
+            width: 100, columnSpan: 3,
             children: [
               P({ text: 'Description:', bold: true }),
               new Paragraph({
@@ -523,20 +538,14 @@
             ]
           })]
         });
-        const infoTable = new Table({
-          width: { size: CONTENT_W, type: WidthType.DXA },
-          columnWidths: [COL_INFO_DATE, COL_INFO_PROJ, COL_INFO_CONT],
-          rows: [infoRow1, descRow]
-        });
+        const infoTable = fullWidthTable([infoRow1, descRow]);
 
         const list = report.complianceList && report.complianceList.length ? report.complianceList : DEFAULT_COMPLIANCE;
         const complianceChildren = [P({ text: 'Inspection for compliance to the following documents:', bold: true })];
         list.forEach((item, i) => complianceChildren.push(P({ text: `${i + 1}. ${item}` })));
-        const complianceTable = new Table({
-          width: { size: CONTENT_W, type: WidthType.DXA },
-          columnWidths: [CONTENT_W],
-          rows: [new TableRow({ children: [cell({ width: CONTENT_W, children: complianceChildren })] })]
-        });
+        const complianceTable = fullWidthTable([new TableRow({
+          children: [cell({ width: 100, children: complianceChildren })]
+        })]);
 
         return [
           logoTable, title, infoTable, emptyP(), complianceTable,
@@ -587,9 +596,9 @@
         const headerRow = new TableRow({
           tableHeader: true,
           children: [
-            cell({ width: COL_FIND_NO, shading: { fill: 'D9D9D9' }, children: [P({ text: 'No.', bold: true, align: AlignmentType.CENTER })] }),
-            cell({ width: COL_FIND_ACT, shading: { fill: 'D9D9D9' }, children: [P({ text: 'Work Activity', bold: true, align: AlignmentType.CENTER })] }),
-            cell({ width: COL_FIND_DESC, shading: { fill: 'D9D9D9' }, children: [P({ text: 'Findings Description / Photo of Findings', bold: true, align: AlignmentType.CENTER })] }),
+            cell({ width: COL_FIND_NO_PCT, shading: { fill: 'D9D9D9' }, children: [P({ text: 'No.', bold: true, align: AlignmentType.CENTER })] }),
+            cell({ width: COL_FIND_ACT_PCT, shading: { fill: 'D9D9D9' }, children: [P({ text: 'Work Activity', bold: true, align: AlignmentType.CENTER })] }),
+            cell({ width: COL_FIND_DESC_PCT, shading: { fill: 'D9D9D9' }, children: [P({ text: 'Findings Description / Photo of Findings', bold: true, align: AlignmentType.CENTER })] }),
           ]
         });
         const rows = [headerRow];
@@ -597,26 +606,22 @@
           const cellChildren = await buildFindingCellChildren(cards[i]);
           rows.push(new TableRow({
             children: [
-              cell({ width: COL_FIND_NO, children: [P({ text: String(i + 1), align: AlignmentType.CENTER })] }),
-              cell({ width: COL_FIND_ACT, children: [P({ text: cards[i].workActivity || '', bold: true })] }),
-              cell({ width: COL_FIND_DESC, children: cellChildren }),
+              cell({ width: COL_FIND_NO_PCT, children: [P({ text: String(i + 1), align: AlignmentType.CENTER })] }),
+              cell({ width: COL_FIND_ACT_PCT, children: [P({ text: cards[i].workActivity || '', bold: true })] }),
+              cell({ width: COL_FIND_DESC_PCT, children: cellChildren }),
             ]
           }));
         }
         rows.push(new TableRow({
           children: [cell({
-            width: CONTENT_W, columnSpan: 3,
+            width: 100, columnSpan: 3,
             children: [new Paragraph({
               spacing: { before: 60, after: 60 },
               children: [TR('Conclusion: ', { bold: true }), TR(conclusion || '')]
             })]
           })]
         }));
-        return new Table({
-          width: { size: CONTENT_W, type: WidthType.DXA },
-          columnWidths: [COL_FIND_NO, COL_FIND_ACT, COL_FIND_DESC],
-          rows
-        });
+        return fullWidthTable(rows);
       }
 
       async function generateDocxBlob(report) {
@@ -686,7 +691,8 @@
           cardId: newId(),
           entryType, category: 'Safety',
           workActivity: '', description: '',
-          photos: [], findings: []
+          photos: [], findings: [],
+          collapsed: false       // new cards start expanded so the user can type into them
         };
       }
       function newFinding() { return { id: newId(), description: '', photos: [] }; }
@@ -923,11 +929,55 @@
         );
       }
 
+      // Compute the validation/status of a card. Returns:
+      //   { isComplete, issues: ['needs work activity', 'needs photos', ...],
+      //     photoCount, findingCount }
+      // The header uses this to show red badges (incomplete) or a green check
+      // (complete) so a long list of cards is scannable at a glance.
+      function cardStatus(card) {
+        const issues = [];
+        let photoCount = 0;
+        let findingCount = 0;
+
+        if (!card.workActivity || !card.workActivity.trim()) {
+          issues.push('needs work activity');
+        }
+
+        if (card.entryType === 'good') {
+          if (!card.description || !card.description.trim()) {
+            issues.push('needs description');
+          }
+          photoCount = (card.photos || []).length;
+          findingCount = 1;
+        } else {
+          // Finding card: either single-finding (description+photos at card level)
+          // or multi-finding (each in card.findings).
+          const items = (card.findings && card.findings.length)
+            ? card.findings
+            : [{ description: card.description, photos: card.photos }];
+          findingCount = items.length;
+          for (const it of items) {
+            const itemPhotos = (it.photos || []).length;
+            photoCount += itemPhotos;
+            if (!it.description || !it.description.trim()) {
+              if (!issues.includes('needs description')) issues.push('needs description');
+            }
+            if (itemPhotos === 0) {
+              if (!issues.includes('needs photos')) issues.push('needs photos');
+            }
+          }
+        }
+
+        return { isComplete: issues.length === 0, issues, photoCount, findingCount };
+      }
+
       function FindingCard({ index, card, onChange, onRemove, onPreview,
                              onDragStartCard, onDragOverCard, onDragEndCard }) {
         const [draggable, setDraggable] = useState(false);
         const isGood = card.entryType === 'good';
         const hasMulti = !isGood && card.findings && card.findings.length > 0;
+        const collapsed = !!card.collapsed;
+        const status = cardStatus(card);
 
         function update(patch) { onChange({ ...card, ...patch }); }
         function setEntryType(t) {
@@ -935,6 +985,7 @@
           else update({ entryType: 'finding' });
         }
         function setPhotos(photos) { update({ photos }); }
+        function toggleCollapsed() { update({ collapsed: !collapsed }); }
         function addAdditionalFinding() {
           let findings = card.findings, patch = {};
           if (!findings || findings.length === 0) {
@@ -956,84 +1007,143 @@
           }
         }
 
+        // Stop propagation so clicks on these elements don't toggle collapse.
+        const stop = (handler) => (e) => { e.stopPropagation(); if (handler) handler(e); };
+
+        // Header text: "1. Work Activity Name" if filled, else red "Card 1".
+        const hasActivity = card.workActivity && card.workActivity.trim();
+        const headerText = hasActivity
+          ? `${index + 1}. ${card.workActivity}`
+          : `Card ${index + 1}`;
+        const headerTextClass = hasActivity ? 'text-gray-800' : 'text-red-600';
+
         return (
           <div className="bg-white rounded-lg border border-gray-200 shadow-sm"
                draggable={draggable}
                onDragStart={onDragStartCard}
                onDragOver={onDragOverCard}
                onDragEnd={() => { setDraggable(false); onDragEndCard(); }}>
-            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 rounded-t-lg">
-              <div className="flex items-center gap-3 flex-wrap">
-                <span className="cursor-grab text-gray-400 select-none px-1 text-lg leading-none"
+
+            {/* Clickable header — toggles collapse when you click the empty
+                space; the toggle/dropdown/delete buttons inside stop propagation
+                so they keep working independently. */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 rounded-t-lg cursor-pointer hover:bg-gray-100 transition-colors"
+                 onClick={toggleCollapsed}>
+              <div className="flex items-center gap-3 flex-wrap min-w-0 flex-1">
+                <span className="cursor-grab text-gray-400 select-none px-1 text-lg leading-none flex-shrink-0"
                       title="Drag to reorder card"
-                      onMouseDown={() => setDraggable(true)}
-                      onMouseUp={() => setDraggable(false)}
+                      onClick={stop()}
+                      onMouseDown={stop(() => setDraggable(true))}
+                      onMouseUp={stop(() => setDraggable(false))}
                       onMouseLeave={() => setDraggable(false)}>≡</span>
-                <span className="text-sm font-medium text-gray-700">Card {index + 1}</span>
-                <EntryTypeToggle value={card.entryType} onChange={setEntryType} />
-                <CategorySelect value={card.category} onChange={cat => update({ category: cat })} />
-              </div>
-              <button onClick={onRemove} className="text-sm text-red-500 hover:underline">Delete</button>
-            </div>
-
-            <div className="p-4 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Work Activity</label>
-                <input type="text" value={card.workActivity}
-                       onChange={e => update({ workActivity: e.target.value })}
-                       placeholder="e.g. Working at Height"
-                       className="w-full px-3 py-2 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-accent-500 focus:border-transparent" />
-              </div>
-
-              {isGood && (
-                <SingleEntryEditor
-                  label="Observation"
-                  description={card.description}
-                  onDescription={(v) => update({ description: v })}
-                  templates={GOOD_OBSERVATION_TEMPLATES}
-                  photos={card.photos}
-                  onPhotos={setPhotos}
-                  requirePhoto={false}
-                  onPreview={onPreview} />
-              )}
-              {!isGood && !hasMulti && (
-                <SingleEntryEditor
-                  label="Finding"
-                  description={card.description}
-                  onDescription={(v) => update({ description: v })}
-                  templates={FINDING_TEMPLATES}
-                  photos={card.photos}
-                  onPhotos={setPhotos}
-                  requirePhoto={true}
-                  onPreview={onPreview} />
-              )}
-              {!isGood && hasMulti && (
-                <div className="space-y-3">
-                  {card.findings.map((f, j) => (
-                    <div key={f.id} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="text-xs font-medium text-gray-600">Finding {j + 1} of {card.findings.length}</span>
-                        <button onClick={() => removeFinding(f.id)} className="text-xs text-red-500 hover:underline">Remove</button>
-                      </div>
-                      <FindingItemEditor
-                        description={f.description}
-                        onDescription={(v) => updateFinding(f.id, { description: v })}
-                        photos={f.photos}
-                        onPhotos={(photos) => updateFinding(f.id, { photos })}
-                        templates={FINDING_TEMPLATES}
-                        onPreview={onPreview} />
-                    </div>
-                  ))}
+                <span className={'text-sm font-medium truncate ' + headerTextClass}>{headerText}</span>
+                <div onClick={stop()}>
+                  <EntryTypeToggle value={card.entryType} onChange={setEntryType} />
                 </div>
-              )}
-              {!isGood && (
-                <button onClick={addAdditionalFinding}
-                        className="px-3 py-1.5 rounded border border-dashed border-gray-300 text-sm text-gray-600 hover:bg-gray-50">
-                  + Add Another Finding under this Work Activity
-                </button>
-              )}
+                <div onClick={stop()}>
+                  <CategorySelect value={card.category} onChange={cat => update({ category: cat })} />
+                </div>
+                <CardStatusBadges status={status} />
+              </div>
+              <div className="flex items-center gap-3 flex-shrink-0">
+                <button onClick={stop(onRemove)}
+                        className="text-sm text-red-500 hover:underline">Delete</button>
+                <span className="text-gray-400 text-sm select-none w-4 text-center"
+                      title={collapsed ? 'Expand' : 'Collapse'}>
+                  {collapsed ? '▾' : '▴'}
+                </span>
+              </div>
             </div>
+
+            {/* Body — only rendered when expanded. The cards still exist in
+                state when collapsed; we just hide the form fields. */}
+            {!collapsed && (
+              <div className="p-4 space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">Work Activity</label>
+                  <input type="text" value={card.workActivity}
+                         onChange={e => update({ workActivity: e.target.value })}
+                         placeholder="e.g. Working at Height"
+                         className="w-full px-3 py-2 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-accent-500 focus:border-transparent" />
+                </div>
+
+                {isGood && (
+                  <SingleEntryEditor
+                    label="Observation"
+                    description={card.description}
+                    onDescription={(v) => update({ description: v })}
+                    templates={GOOD_OBSERVATION_TEMPLATES}
+                    photos={card.photos}
+                    onPhotos={setPhotos}
+                    requirePhoto={false}
+                    onPreview={onPreview} />
+                )}
+                {!isGood && !hasMulti && (
+                  <SingleEntryEditor
+                    label="Finding"
+                    description={card.description}
+                    onDescription={(v) => update({ description: v })}
+                    templates={FINDING_TEMPLATES}
+                    photos={card.photos}
+                    onPhotos={setPhotos}
+                    requirePhoto={true}
+                    onPreview={onPreview} />
+                )}
+                {!isGood && hasMulti && (
+                  <div className="space-y-3">
+                    {card.findings.map((f, j) => (
+                      <div key={f.id} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-xs font-medium text-gray-600">Finding {j + 1} of {card.findings.length}</span>
+                          <button onClick={() => removeFinding(f.id)} className="text-xs text-red-500 hover:underline">Remove</button>
+                        </div>
+                        <FindingItemEditor
+                          description={f.description}
+                          onDescription={(v) => updateFinding(f.id, { description: v })}
+                          photos={f.photos}
+                          onPhotos={(photos) => updateFinding(f.id, { photos })}
+                          templates={FINDING_TEMPLATES}
+                          onPreview={onPreview} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!isGood && (
+                  <button onClick={addAdditionalFinding}
+                          className="px-3 py-1.5 rounded border border-dashed border-gray-300 text-sm text-gray-600 hover:bg-gray-50">
+                    + Add Another Finding under this Work Activity
+                  </button>
+                )}
+              </div>
+            )}
           </div>
+        );
+      }
+
+      // Small badge component for the card header. Shows red issue chips
+      // when something's missing, or a quiet "N photos" summary when the card
+      // is complete.
+      function CardStatusBadges({ status }) {
+        if (status.issues.length > 0) {
+          return (
+            <div className="flex items-center gap-1 flex-wrap">
+              {status.issues.map(msg => (
+                <span key={msg}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-medium">
+                  ⚠ {msg}
+                </span>
+              ))}
+            </div>
+          );
+        }
+        // All good — show a quiet summary
+        const parts = [];
+        if (status.findingCount > 1) parts.push(`${status.findingCount} findings`);
+        parts.push(`${status.photoCount} photo${status.photoCount === 1 ? '' : 's'}`);
+        return (
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-medium">
+            ✓ {parts.join(' · ')}
+          </span>
         );
       }
 
