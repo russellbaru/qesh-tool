@@ -1,0 +1,1325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QESH Inspection Builder</title>
+
+  <!--
+    SINGLE-FILE QESH INSPECTION BUILDER
+    ===================================
+    No build step, no npm install, no Node.js required. Just open this file
+    in a browser. Everything you need is loaded from CDNs (which are cached
+    after first load, so subsequent opens are fast and work offline).
+
+    Architecture:
+      1. Tailwind CSS via CDN script — provides utility classes inline.
+      2. React + ReactDOM via esm.sh — modern ESM CDN.
+      3. docx (Word generation) and idb-keyval (IndexedDB wrapper) via esm.sh.
+      4. Babel Standalone compiles JSX in the browser at load time.
+         Adds ~1s to first page load. Fine for a personal tool used twice
+         a week. If it ever feels slow, the build-step version is in the
+         qesh-builder.zip.
+
+      The ESM imports happen in a <script type="module"> block at the top.
+      Those modules get stashed on window.__deps so the Babel-transformed
+      code below can find them synchronously.
+  -->
+
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Tailwind config — set the accent color used throughout the app.
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            accent: { 50: '#eff6ff', 500: '#2563eb', 600: '#1d4ed8', 700: '#1e40af' }
+          }
+        }
+      }
+    };
+  </script>
+
+  <style>
+    html, body, #root { height: 100%; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      background: #fafafa;
+      color: #111827;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 6px; }
+    ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+    /* Splash shown until the app boots */
+    #boot-splash {
+      position: fixed; inset: 0; display: flex; align-items: center;
+      justify-content: center; flex-direction: column; gap: 12px;
+      background: #fafafa; color: #6b7280; font-size: 14px;
+    }
+    #boot-splash.hidden { display: none; }
+    .spinner {
+      width: 28px; height: 28px; border: 3px solid #e5e7eb;
+      border-top-color: #2563eb; border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+
+  <!--
+    Step 1: Declare an import map so all our deps + their internal deps
+    resolve to consistent versions. This is the pattern esm.sh recommends
+    for avoiding the "two Reacts loaded" pitfall.
+
+    We use major-version pins (@18, @8, @6) instead of exact patch versions,
+    because exact patches can occasionally fail on esm.sh due to its
+    internal version resolution. Major-version pins always resolve to the
+    latest stable.
+  -->
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18",
+        "react-dom/client": "https://esm.sh/react-dom@18/client?deps=react@18",
+        "docx": "https://esm.sh/docx@8?deps=react@18",
+        "idb-keyval": "https://esm.sh/idb-keyval@6"
+      }
+    }
+  </script>
+
+  <!--
+    Step 2: Load deps via the import map and stash them on window for
+    the Babel block to pick up.
+  -->
+  <script type="module">
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+    import * as docx from 'docx';
+    import * as idbKeyval from 'idb-keyval';
+
+    window.__deps = { React, createRoot, docx, idbKeyval };
+    window.__depsReady = true;
+    window.dispatchEvent(new Event('deps-ready'));
+  </script>
+
+  <!--
+    Step 3: Load Babel Standalone for JSX compilation.
+    `data-presets="react"` on the script below tells Babel to compile JSX.
+  -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="boot-splash">
+    <div class="spinner"></div>
+    <div>Loading QESH Inspection Builder…</div>
+    <div style="font-size: 12px; color: #9ca3af; max-width: 320px; text-align: center;">
+      First load fetches a few libraries from CDN (about 1MB total).
+      Subsequent loads are cached and instant.
+    </div>
+  </div>
+
+  <!--
+    Step 3: The actual app, JSX compiled in-browser by Babel.
+    We wrap everything in a function that waits for window.__deps to be ready.
+  -->
+  <script type="text/babel" data-presets="react" data-type="module">
+    /* eslint-disable */
+    // Wait for the ESM imports above to finish loading before booting.
+    function whenDepsReady(cb) {
+      if (window.__depsReady) cb();
+      else window.addEventListener('deps-ready', cb, { once: true });
+    }
+
+    whenDepsReady(() => {
+      const { React, createRoot, docx, idbKeyval } = window.__deps;
+      const { useState, useEffect, useRef, useCallback } = React;
+
+      const {
+        Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+        ImageRun, AlignmentType, BorderStyle, WidthType, HeightRule, VerticalAlign
+      } = docx;
+
+      const { get: idbGet, set: idbSet, del: idbDel, keys: idbKeys, createStore } = idbKeyval;
+
+      // ============================================================
+      // STORAGE LAYER
+      //   - localStorage holds the report shape (text + photo refs)
+      //   - IndexedDB holds the photo Blobs themselves
+      //   - Backups serialize photos to base64 for portable JSON files
+      // ============================================================
+      const photoStore = createStore('qesh-photos', 'photos');
+      const REPORT_KEY = 'qesh.report.v1';
+
+      function emptyReport() {
+        return {
+          inspectionDate: '',
+          projectName: '',
+          contractorName: '',
+          conclusion: '',
+          cards: []
+        };
+      }
+
+      function loadReport() {
+        try {
+          const raw = localStorage.getItem(REPORT_KEY);
+          if (!raw) return emptyReport();
+          return { ...emptyReport(), ...JSON.parse(raw) };
+        } catch { return emptyReport(); }
+      }
+
+      function saveReport(report) {
+        localStorage.setItem(REPORT_KEY, JSON.stringify(report));
+      }
+
+      function clearReport() { localStorage.removeItem(REPORT_KEY); }
+
+      async function putPhoto(blob) {
+        const id = 'p_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+        await idbSet(id, blob, photoStore);
+        return id;
+      }
+      async function getPhoto(id) {
+        try { return (await idbGet(id, photoStore)) || null; }
+        catch { return null; }
+      }
+      async function deletePhoto(id) {
+        try { await idbDel(id, photoStore); } catch {}
+      }
+
+      // Garbage-collect orphaned photo blobs not referenced by any card.
+      async function gcOrphanPhotos(report) {
+        const referenced = new Set();
+        (report.cards || []).forEach(c => {
+          (c.photos || []).forEach(p => p.photoId && referenced.add(p.photoId));
+          (c.findings || []).forEach(f => (f.photos || []).forEach(p => p.photoId && referenced.add(p.photoId)));
+        });
+        const all = await idbKeys(photoStore);
+        await Promise.all(all
+          .filter(k => typeof k === 'string' && !referenced.has(k))
+          .map(k => idbDel(k, photoStore)));
+      }
+
+      async function wipeAll() {
+        clearReport();
+        const all = await idbKeys(photoStore);
+        await Promise.all(all.map(k => idbDel(k, photoStore)));
+      }
+
+      function blobToDataURL(blob) {
+        return new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = reject;
+          r.readAsDataURL(blob);
+        });
+      }
+      async function dataURLToBlob(dataUrl) {
+        return (await fetch(dataUrl)).blob();
+      }
+
+      async function exportBackup(report) {
+        const photos = {};
+        const ids = new Set();
+        (report.cards || []).forEach(c => {
+          (c.photos || []).forEach(p => p.photoId && ids.add(p.photoId));
+          (c.findings || []).forEach(f => (f.photos || []).forEach(p => p.photoId && ids.add(p.photoId)));
+        });
+        for (const id of ids) {
+          const blob = await getPhoto(id);
+          if (blob) photos[id] = await blobToDataURL(blob);
+        }
+        return JSON.stringify({ version: 1, savedAt: new Date().toISOString(), report, photos }, null, 2);
+      }
+
+      async function importBackup(jsonString) {
+        const parsed = JSON.parse(jsonString);
+        if (parsed.version !== 1 || !parsed.report) throw new Error('Unrecognized backup file.');
+        await wipeAll();
+        for (const [id, dataUrl] of Object.entries(parsed.photos || {})) {
+          const blob = await dataURLToBlob(dataUrl);
+          await idbSet(id, blob, photoStore);
+        }
+        saveReport(parsed.report);
+        return parsed.report;
+      }
+
+      // ============================================================
+      // PHOTO PROCESSING — resize + EXIF strip via canvas re-encode
+      // ============================================================
+      const TARGET_W = 1200;
+      const TARGET_H = 900;
+      const JPEG_QUALITY = 0.82;
+
+      async function processPhoto(file) {
+        if (!/^image\/(jpeg|jpg|png)$/i.test(file.type)) {
+          throw new Error('Only JPEG and PNG accepted.');
+        }
+        let bitmap;
+        try {
+          bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+        } catch {
+          bitmap = await loadImageElement(file);
+        }
+        const { width, height } = fitWithin(bitmap.width, bitmap.height, TARGET_W, TARGET_H);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(width));
+        canvas.height = Math.max(1, Math.round(height));
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        if (bitmap.close) bitmap.close();
+        const blob = await new Promise((resolve, reject) =>
+          canvas.toBlob(b => b ? resolve(b) : reject(new Error('Encode failed')), 'image/jpeg', JPEG_QUALITY));
+        return { blob, width: canvas.width, height: canvas.height, sizeBytes: blob.size };
+      }
+
+      function fitWithin(srcW, srcH, dstW, dstH) {
+        if (srcW <= dstW && srcH <= dstH) return { width: srcW, height: srcH };
+        const ratio = Math.min(dstW / srcW, dstH / srcH);
+        return { width: srcW * ratio, height: srcH * ratio };
+      }
+      function loadImageElement(file) {
+        return new Promise((resolve, reject) => {
+          const url = URL.createObjectURL(file);
+          const img = new Image();
+          img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+          img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not decode image')); };
+          img.src = url;
+        });
+      }
+
+      function blobToObjectUrl(blob) { return URL.createObjectURL(blob); }
+
+      // ============================================================
+      // EMBEDDED COMPANY LOGO
+      // The Sunway Property logo, base64-encoded JPEG (white background, ~25KB).
+      // We decode it once at module load into a Uint8Array so docgen can drop
+      // it into ImageRun without async work. Logo is 600x230 px, displayed at
+      // ~1.6" wide which fits the 1.92" logo cell with a small margin.
+      // ============================================================
+      const COMPANY_LOGO_B64 = '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';
+      const COMPANY_LOGO_W_PX = 1.6 * 96;   // ~154 px wide in the doc
+      const COMPANY_LOGO_H_PX = COMPANY_LOGO_W_PX * (230 / 600); // preserve aspect ratio
+      const COMPANY_LOGO_BYTES = (() => {
+        const bin = atob(COMPANY_LOGO_B64);
+        const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        return arr;
+      })();
+
+      // The fixed client name shown in the top-right of the cover page.
+      // Hardcoded because every report this app generates is for the same client.
+      const CLIENT_NAME = 'SUNWAY INTEGRATED PROPERTIES SDN BHD';
+
+      // ============================================================
+      // DOCX GENERATION — calibrated against the real Sunway template
+      //   US Letter, 0.5" margins
+      //   Font: Sunway Sans_beta at 11pt (Word will fall back to a
+      //         sensible default if the font isn't installed)
+      //   Content width: 7.28" (matches the template, not the full 7.5"
+      //         between margins)
+      //   Cover: logo on left + contractor name on right (1.92" / 5.36"),
+      //          centered title, 2-row info table (header+value combined,
+      //          then merged Description row), compliance list
+      //   Findings: 3-col table (0.49" / 2.06" / 4.72")
+      //     - Good Observation: photos ABOVE the "Good Observation:" caption
+      //     - Finding: photos, then "Finding:" caption, then placeholder
+      //       lines "Rectify by MC: [Photo]" and "Rectification: [Description]"
+      //     - Photos preserve aspect ratio inside a 4.02" x 3.01" max box
+      //   Conclusion: last row of the findings table, spans all 3 columns
+      // ============================================================
+      const inch = (n) => Math.round(n * 1440);
+      const PAGE_W = inch(8.5), PAGE_H = inch(11), MARGIN = inch(0.5);
+
+      // The actual template uses a content width of 7.28" (10490 DXA), not the
+      // full 7.5" between margins. This leaves a small visual buffer on the
+      // right edge that matches the original report.
+      const CONTENT_W = inch(7.28);
+
+      // Cover page logos: 1.92" / 5.36" — straight from the template.
+      const COL_LOGO_LEFT = inch(1.92);
+      const COL_LOGO_RIGHT = CONTENT_W - COL_LOGO_LEFT;
+
+      // Info table: 1.87" / 2.46" / 2.76" — measured from the template.
+      // (The original spec had different numbers; the template wins.)
+      const COL_INFO_DATE = inch(1.87);
+      const COL_INFO_PROJ = inch(2.46);
+      const COL_INFO_CONT = CONTENT_W - COL_INFO_DATE - COL_INFO_PROJ;
+
+      // Findings table: 0.49" / 2.06" / 4.72" — measured from the template.
+      // (Spec said Work Activity was 1.87"; the template uses 2.06".)
+      const COL_FIND_NO = inch(0.49);
+      const COL_FIND_ACT = inch(2.06);
+      const COL_FIND_DESC = CONTENT_W - COL_FIND_NO - COL_FIND_ACT;
+
+      // Photo box: max 4.02" x 3.01" but aspect ratio is preserved (see
+      // photoParagraph below — portrait photos stay portrait, fit-within).
+      const PHOTO_MAX_W_PX = 4.02 * 96;
+      const PHOTO_MAX_H_PX = 3.01 * 96;
+
+      const SINGLE = { style: BorderStyle.SINGLE, size: 6, color: '000000' };
+      const ALL_BORDERS = { top: SINGLE, bottom: SINGLE, left: SINGLE, right: SINGLE };
+
+      // The corporate template uses "Sunway Sans_beta" at 11pt. Most machines
+      // won't have that font, so Word will fall back to a default — but we
+      // declare it as the primary so the corporate machines that DO have it
+      // render correctly. Calibri is a sensible visual fallback.
+      const FONT = 'Sunway Sans_beta';
+      const SIZE = 22; // 11pt in half-points (was 24 = 12pt)
+
+      const DEFAULT_COMPLIANCE = [
+        'Occupational Safety and Health Act 1994 (Amendment 2022)',
+        'Environmental Quality Act 1974 (Amendment 2024)'
+      ];
+
+      function P({ text = '', bold = false, italic = false, align, children, spacing } = {}) {
+        if (children) return new Paragraph({ alignment: align, spacing: spacing || { before: 0, after: 0 }, children });
+        return new Paragraph({
+          alignment: align,
+          spacing: spacing || { before: 0, after: 0 },
+          children: [new TextRun({ text, bold, italics: italic, font: FONT, size: SIZE })]
+        });
+      }
+      function TR(text, opts = {}) {
+        return new TextRun({ text, bold: !!opts.bold, italics: !!opts.italic, font: FONT, size: SIZE });
+      }
+      function emptyP() { return new Paragraph({ children: [new TextRun({ text: '', font: FONT, size: SIZE })] }); }
+      function cell({ children, width, borders = ALL_BORDERS, shading, verticalAlign = VerticalAlign.TOP, columnSpan }) {
+        const opts = {
+          borders,
+          width: { size: width, type: WidthType.DXA },
+          margins: { top: 80, bottom: 80, left: 120, right: 120 },
+          verticalAlign,
+          children: children && children.length ? children : [emptyP()]
+        };
+        if (shading) opts.shading = shading;
+        if (columnSpan) opts.columnSpan = columnSpan;
+        return new TableCell(opts);
+      }
+
+      function formatDateLong(yyyymmdd) {
+        if (!yyyymmdd) return '';
+        const [y, m, d] = yyyymmdd.split('-');
+        if (!y || !m || !d) return yyyymmdd;
+        const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+        return `${d.padStart(2,'0')} ${months[parseInt(m,10)-1]} ${y}`;
+      }
+
+      async function blobToArrayBuffer(blob) {
+        if (blob.arrayBuffer) return blob.arrayBuffer();
+        return new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = reject;
+          r.readAsArrayBuffer(blob);
+        });
+      }
+
+      async function photoParagraph(photoRef) {
+        if (!photoRef?.photoId) return P({ text: '[Photo missing]', italic: true });
+        const blob = await getPhoto(photoRef.photoId);
+        if (!blob) return P({ text: '[Photo missing]', italic: true });
+        const data = new Uint8Array(await blobToArrayBuffer(blob));
+
+        // Fit-within: keep the photo's aspect ratio, scale down so it fits in
+        // a 4.02" x 3.01" box. Landscape photos hit the width limit at 4.02";
+        // portrait photos hit the height limit at 3.01".
+        const srcW = photoRef.width  || PHOTO_MAX_W_PX;
+        const srcH = photoRef.height || PHOTO_MAX_H_PX;
+        const ratio = Math.min(PHOTO_MAX_W_PX / srcW, PHOTO_MAX_H_PX / srcH, 1);
+        const w = Math.round(srcW * ratio);
+        const h = Math.round(srcH * ratio);
+
+        return new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { before: 60, after: 60 },
+          children: [new ImageRun({
+            data,
+            transformation: { width: w, height: h },
+            type: 'jpg'
+          })]
+        });
+      }
+
+      function buildCoverPage(report) {
+        const { inspectionDate, projectName, contractorName } = report;
+
+        // Logo row: left cell shows the embedded Sunway Property logo, right
+        // cell shows the hardcoded client name in bold. Note: the contractor
+        // name from the form does NOT go here — that goes in the info table
+        // below. The right side of the logo row is always the client.
+        const logoTable = new Table({
+          width: { size: CONTENT_W, type: WidthType.DXA },
+          columnWidths: [COL_LOGO_LEFT, COL_LOGO_RIGHT],
+          rows: [new TableRow({
+            height: { value: inch(1.0), rule: HeightRule.ATLEAST },
+            children: [
+              cell({ width: COL_LOGO_LEFT,
+                     verticalAlign: VerticalAlign.CENTER,
+                     children: [new Paragraph({
+                       alignment: AlignmentType.CENTER,
+                       spacing: { before: 0, after: 0 },
+                       children: [new ImageRun({
+                         data: COMPANY_LOGO_BYTES,
+                         transformation: { width: COMPANY_LOGO_W_PX, height: COMPANY_LOGO_H_PX },
+                         type: 'jpg'
+                       })]
+                     })] }),
+              cell({ width: COL_LOGO_RIGHT,
+                     verticalAlign: VerticalAlign.CENTER,
+                     children: [P({ text: CLIENT_NAME, bold: true, align: AlignmentType.CENTER })] }),
+            ]
+          })]
+        });
+
+        const title = new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { before: 240, after: 240 },
+          children: [new TextRun({ text: 'COE - QESH INSPECTION REPORT', bold: true, font: FONT, size: 28 })]
+          // size 28 = 14pt for the title (was 16pt; template uses ~14pt)
+        });
+
+        // Info table — 2 rows total:
+        //   Row 1: three cells, each with a bold header on top
+        //          ("INSPECTION DATE:" / "PROJECT:" / "CONTRACTORS:") followed
+        //          by the value on the next line in the same cell.
+        //   Row 2: full-width merged cell with bold "Description:" header
+        //          followed by the description paragraph.
+        function headerValueCell(width, header, value) {
+          return cell({
+            width,
+            children: [
+              P({ text: header, bold: true }),
+              P({ text: value || '' })
+            ]
+          });
+        }
+        const infoRow1 = new TableRow({
+          height: { value: inch(0.6), rule: HeightRule.ATLEAST },
+          children: [
+            headerValueCell(COL_INFO_DATE, 'INSPECTION DATE:', formatDateLong(inspectionDate)),
+            headerValueCell(COL_INFO_PROJ, 'PROJECT:',         projectName || ''),
+            headerValueCell(COL_INFO_CONT, 'CONTRACTORS:',     contractorName || ''),
+          ]
+        });
+        const descRow = new TableRow({
+          children: [cell({
+            width: CONTENT_W, columnSpan: 3,
+            children: [
+              P({ text: 'Description:', bold: true }),
+              new Paragraph({
+                spacing: { before: 0, after: 0 },
+                children: [
+                  TR('This report documents the findings of inspection conducted to assess compliance with applicable '),
+                  TR('Quality, Environmental, Safety and Health (ESH)', { bold: true }),
+                  TR(' requirements at the above location.')
+                ]
+              })
+            ]
+          })]
+        });
+        const infoTable = new Table({
+          width: { size: CONTENT_W, type: WidthType.DXA },
+          columnWidths: [COL_INFO_DATE, COL_INFO_PROJ, COL_INFO_CONT],
+          rows: [infoRow1, descRow]
+        });
+
+        const list = report.complianceList && report.complianceList.length ? report.complianceList : DEFAULT_COMPLIANCE;
+        const complianceChildren = [P({ text: 'Inspection for compliance to the following documents:', bold: true })];
+        list.forEach((item, i) => complianceChildren.push(P({ text: `${i + 1}. ${item}` })));
+        const complianceTable = new Table({
+          width: { size: CONTENT_W, type: WidthType.DXA },
+          columnWidths: [CONTENT_W],
+          rows: [new TableRow({ children: [cell({ width: CONTENT_W, children: complianceChildren })] })]
+        });
+
+        return [
+          logoTable, title, infoTable, emptyP(), complianceTable,
+          new Paragraph({ children: [new TextRun({ text: '', break: 1 })], pageBreakBefore: true })
+        ];
+      }
+
+      async function buildFindingCellChildren(card) {
+        const out = [];
+        if (card.entryType === 'good') {
+          // Template puts photos ABOVE the "Good Observation:" text — that
+          // way the reader sees the visual evidence first, then the caption.
+          for (const ph of (card.photos || [])) out.push(await photoParagraph(ph));
+          out.push(new Paragraph({
+            spacing: { before: 60, after: 60 },
+            children: [TR('Good Observation: ', { bold: true }), TR(card.description || '')]
+          }));
+        } else {
+          // Findings: photos first, then "Finding:" caption, then placeholder
+          // lines for the contractor to fill in later.
+          const items = (card.findings && card.findings.length)
+            ? card.findings
+            : [{ description: card.description || '', photos: card.photos || [] }];
+          for (let i = 0; i < items.length; i++) {
+            if (i > 0) out.push(emptyP());
+            for (const ph of (items[i].photos || [])) out.push(await photoParagraph(ph));
+            out.push(new Paragraph({
+              spacing: { before: 60, after: 60 },
+              children: [TR('Finding: ', { bold: true }), TR(items[i].description || '')]
+            }));
+            // Placeholder text that signals to the MC where to add their
+            // rectification photo and description after the report is shared.
+            out.push(new Paragraph({
+              spacing: { before: 60, after: 0 },
+              children: [TR('Rectify by MC: ', { bold: true }), TR('[Photo]', { bold: true })]
+            }));
+            out.push(new Paragraph({
+              spacing: { before: 60, after: 0 },
+              children: [TR('Rectification: ', { bold: true }), TR('[Description]', { bold: true })]
+            }));
+          }
+        }
+        if (!out.length) out.push(emptyP());
+        return out;
+      }
+
+      async function buildFindingsTable(cards, conclusion) {
+        const headerRow = new TableRow({
+          tableHeader: true,
+          children: [
+            cell({ width: COL_FIND_NO, shading: { fill: 'D9D9D9' }, children: [P({ text: 'No.', bold: true, align: AlignmentType.CENTER })] }),
+            cell({ width: COL_FIND_ACT, shading: { fill: 'D9D9D9' }, children: [P({ text: 'Work Activity', bold: true, align: AlignmentType.CENTER })] }),
+            cell({ width: COL_FIND_DESC, shading: { fill: 'D9D9D9' }, children: [P({ text: 'Findings Description / Photo of Findings', bold: true, align: AlignmentType.CENTER })] }),
+          ]
+        });
+        const rows = [headerRow];
+        for (let i = 0; i < cards.length; i++) {
+          const cellChildren = await buildFindingCellChildren(cards[i]);
+          rows.push(new TableRow({
+            children: [
+              cell({ width: COL_FIND_NO, children: [P({ text: String(i + 1), align: AlignmentType.CENTER })] }),
+              cell({ width: COL_FIND_ACT, children: [P({ text: cards[i].workActivity || '', bold: true })] }),
+              cell({ width: COL_FIND_DESC, children: cellChildren }),
+            ]
+          }));
+        }
+        rows.push(new TableRow({
+          children: [cell({
+            width: CONTENT_W, columnSpan: 3,
+            children: [new Paragraph({
+              spacing: { before: 60, after: 60 },
+              children: [TR('Conclusion: ', { bold: true }), TR(conclusion || '')]
+            })]
+          })]
+        }));
+        return new Table({
+          width: { size: CONTENT_W, type: WidthType.DXA },
+          columnWidths: [COL_FIND_NO, COL_FIND_ACT, COL_FIND_DESC],
+          rows
+        });
+      }
+
+      async function generateDocxBlob(report) {
+        const cover = buildCoverPage(report);
+        const findings = await buildFindingsTable(report.cards || [], report.conclusion);
+        const doc = new Document({
+          styles: { default: { document: { run: { font: FONT, size: SIZE } } } },
+          sections: [{
+            properties: {
+              page: {
+                size: { width: PAGE_W, height: PAGE_H },
+                margin: { top: MARGIN, right: MARGIN, bottom: MARGIN, left: MARGIN }
+              }
+            },
+            children: [...cover, findings]
+          }]
+        });
+        return Packer.toBlob(doc);
+      }
+
+      function buildFilename(report) {
+        const ymd = (report.inspectionDate || '').replace(/-/g, '');
+        const proj = (report.projectName || 'Untitled')
+          .replace(/[^a-zA-Z0-9 _\-]/g, '')
+          .replace(/\s+/g, ' ')
+          .trim() || 'Untitled';
+        return `${ymd} COE QESH Inspection Report - ${proj}`;
+      }
+
+      // ============================================================
+      // QUICK-SELECT TEMPLATES
+      // ============================================================
+      const ACTIVITY_TEMPLATES = [
+        'Site Housekeeping','Working at Height','Scaffolding','Hot Works',
+        'Concreting Works','Reinforcement Works','Excavation Works',
+        'Lifting Operation','Confined Space','Material Storage',
+        'Personal Protective Equipment','Electrical Safety','Fire Safety',
+        'Environmental Management','Quality of Workmanship'
+      ];
+      const FINDING_TEMPLATES = [
+        'Workers observed working at height without harness.',
+        'Scaffolding tag missing or expired.',
+        'Improper material stacking observed.',
+        'Housekeeping inadequate at work area.',
+        'Fire extinguisher inspection overdue.',
+        'PPE not properly worn by workers.',
+        'Honeycombing observed on concrete surface.',
+        'Reinforcement spacing not as per drawing.',
+        'Temporary electrical wiring not secured.',
+        'Waste segregation not followed.'
+      ];
+      const GOOD_OBSERVATION_TEMPLATES = [
+        'Site found clean and well organized.',
+        'PPE properly worn by all workers.',
+        'Good housekeeping practices observed.',
+        'Scaffolding properly tagged and inspected.',
+        'Material storage area well organized.',
+        'Safety briefing observed before work.'
+      ];
+
+      // ============================================================
+      // SHARED UI HELPERS
+      // ============================================================
+      function newId() { return Math.random().toString(36).slice(2, 10); }
+      function newCard(entryType = 'finding') {
+        return {
+          cardId: newId(),
+          entryType, category: 'Safety',
+          workActivity: '', description: '',
+          photos: [], findings: []
+        };
+      }
+      function newFinding() { return { id: newId(), description: '', photos: [] }; }
+
+      function formatTime(ts) {
+        const d = new Date(ts);
+        const day = String(d.getDate()).padStart(2, '0');
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        let h = d.getHours();
+        const m = String(d.getMinutes()).padStart(2, '0');
+        const ampm = h >= 12 ? 'pm' : 'am';
+        h = h % 12; if (h === 0) h = 12;
+        return `${day} ${months[d.getMonth()]} ${d.getFullYear()} ${h}:${m}${ampm}`;
+      }
+
+      function collectCardPhotoIds(card) {
+        const ids = [];
+        (card.photos || []).forEach(p => p.photoId && ids.push(p.photoId));
+        (card.findings || []).forEach(f => (f.photos || []).forEach(p => p.photoId && ids.push(p.photoId)));
+        return ids;
+      }
+
+      function validate(r) {
+        const errs = [];
+        if (!r.inspectionDate) errs.push('Inspection Date is required.');
+        if (!r.projectName?.trim()) errs.push('Project Name is required.');
+        if (!r.cards || r.cards.length === 0) errs.push('Add at least one card.');
+        (r.cards || []).forEach((c, i) => {
+          if (c.entryType === 'finding') {
+            const items = (c.findings && c.findings.length) ? c.findings : [{ photos: c.photos }];
+            items.forEach((it, j) => {
+              if (!it.photos || it.photos.length === 0) {
+                errs.push(`Card ${i + 1}${items.length > 1 ? ` (finding ${j + 1})` : ''}: at least one photo is required.`);
+              }
+            });
+          }
+        });
+        return errs;
+      }
+
+      // ============================================================
+      // PHOTO THUMB / LIGHTBOX
+      // ============================================================
+      function PhotoThumb({ photoId, onClick, className, alt = '' }) {
+        const [url, setUrl] = useState(null);
+        useEffect(() => {
+          let cancelled = false, created = null;
+          (async () => {
+            const blob = await getPhoto(photoId);
+            if (cancelled || !blob) return;
+            created = blobToObjectUrl(blob);
+            setUrl(created);
+          })();
+          return () => {
+            cancelled = true;
+            if (created) URL.revokeObjectURL(created);
+          };
+        }, [photoId]);
+        if (!url) return <div className={(className || '') + ' bg-gray-100 animate-pulse'} />;
+        return <img src={url} alt={alt} className={className} onClick={onClick} />;
+      }
+
+      function PhotoLightbox({ photoId, onClose }) {
+        const [url, setUrl] = useState(null);
+        useEffect(() => {
+          let cancelled = false, created = null;
+          (async () => {
+            const blob = await getPhoto(photoId);
+            if (cancelled || !blob) return;
+            created = blobToObjectUrl(blob);
+            setUrl(created);
+          })();
+          const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+          window.addEventListener('keydown', onKey);
+          return () => {
+            cancelled = true;
+            if (created) URL.revokeObjectURL(created);
+            window.removeEventListener('keydown', onKey);
+          };
+        }, [photoId, onClose]);
+        return (
+          <div onClick={onClose} className="fixed inset-0 bg-black/85 z-50 flex items-center justify-center cursor-pointer p-6">
+            {url
+              ? <img src={url} alt="" className="max-h-full max-w-full object-contain" onClick={e => e.stopPropagation()} />
+              : <div className="text-white">Loading…</div>
+            }
+            <button onClick={onClose}
+                    className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/20 hover:bg-white/30 text-white text-xl">×</button>
+          </div>
+        );
+      }
+
+      // ============================================================
+      // PHOTO EDITOR
+      // ============================================================
+      function PhotoEditor({ photos, onChange, onPreview, required }) {
+        const [busy, setBusy] = useState(false);
+        const [err, setErr] = useState(null);
+        const dragIdx = useRef(null);
+
+        async function handleFiles(fileList) {
+          const files = Array.from(fileList || []);
+          if (!files.length) return;
+          setBusy(true); setErr(null);
+          const added = [];
+          try {
+            for (const f of files) {
+              try {
+                const { blob, width, height } = await processPhoto(f);
+                const photoId = await putPhoto(blob);
+                added.push({ photoId, width, height });
+              } catch (e) {
+                console.error('photo failed:', f.name, e);
+                setErr(`Skipped "${f.name}": ${e.message}`);
+              }
+            }
+            if (added.length) onChange([...(photos || []), ...added]);
+          } finally { setBusy(false); }
+        }
+
+        function removeAt(idx) {
+          const ph = photos[idx];
+          if (ph?.photoId) deletePhoto(ph.photoId);
+          onChange(photos.filter((_, i) => i !== idx));
+        }
+        function onDragStart(idx) { dragIdx.current = idx; }
+        function onDragOver(e, idx) {
+          e.preventDefault();
+          if (dragIdx.current === null || dragIdx.current === idx) return;
+          const next = [...photos];
+          const [moved] = next.splice(dragIdx.current, 1);
+          next.splice(idx, 0, moved);
+          dragIdx.current = idx;
+          onChange(next);
+        }
+        function onDragEnd() { dragIdx.current = null; }
+
+        const empty = !photos || photos.length === 0;
+        return (
+          <div>
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <label className="px-3 py-1.5 rounded border border-gray-300 bg-white text-sm cursor-pointer hover:bg-gray-50 inline-flex items-center gap-1">
+                <span>📷</span> {busy ? 'Processing…' : 'Add photos'}
+                <input type="file" accept="image/jpeg,image/png" multiple
+                       onChange={e => { handleFiles(e.target.files); e.target.value = ''; }}
+                       className="hidden" disabled={busy} />
+              </label>
+              <span className="text-xs text-gray-500">JPEG / PNG — auto-resized, EXIF stripped, drag to reorder</span>
+            </div>
+            {err && <div className="mb-2 text-xs text-red-600">{err}</div>}
+            {required && empty && (
+              <div className="mb-2 p-2 rounded border border-red-200 bg-red-50 text-red-600 text-xs">
+                ⚠ At least one photo is required for findings.
+              </div>
+            )}
+            {!empty && (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                {photos.map((ph, idx) => (
+                  <div key={ph.photoId}
+                       className="relative group border border-gray-200 rounded overflow-hidden bg-gray-50"
+                       draggable
+                       onDragStart={() => onDragStart(idx)}
+                       onDragOver={e => onDragOver(e, idx)}
+                       onDragEnd={onDragEnd}>
+                    <PhotoThumb photoId={ph.photoId}
+                                className="w-full h-24 object-cover cursor-pointer block"
+                                onClick={() => onPreview && onPreview(ph.photoId)} />
+                    <button onClick={(e) => { e.stopPropagation(); removeAt(idx); }}
+                            className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white text-xs hover:bg-black/80 flex items-center justify-center">×</button>
+                    <span className="absolute bottom-1 left-1 text-[10px] bg-black/60 text-white px-1 rounded">{idx + 1}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      // ============================================================
+      // FINDING CARD
+      // ============================================================
+      function EntryTypeToggle({ value, onChange }) {
+        return (
+          <div className="inline-flex rounded border border-gray-300 overflow-hidden text-xs">
+            <button onClick={() => onChange('good')}
+                    className={'px-3 py-1 ' + (value === 'good' ? 'bg-emerald-500 text-white' : 'bg-white text-gray-600 hover:bg-gray-50')}>
+              Good Observation
+            </button>
+            <button onClick={() => onChange('finding')}
+                    className={'px-3 py-1 ' + (value === 'finding' ? 'bg-amber-500 text-white' : 'bg-white text-gray-600 hover:bg-gray-50')}>
+              Finding
+            </button>
+          </div>
+        );
+      }
+      function CategorySelect({ value, onChange }) {
+        return (
+          <select value={value} onChange={e => onChange(e.target.value)}
+                  className="text-xs px-2 py-1 border border-gray-300 rounded bg-white">
+            <option value="Safety">Safety</option>
+            <option value="Quality">Quality</option>
+            <option value="Both">Both</option>
+          </select>
+        );
+      }
+      function SingleEntryEditor({ label, description, onDescription, templates, photos, onPhotos, requirePhoto, onPreview }) {
+        return (
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">{label} description</label>
+            <textarea value={description}
+                      onChange={e => onDescription(e.target.value)}
+                      rows={3}
+                      placeholder={requirePhoto ? 'Describe the finding…' : 'Describe the good observation…'}
+                      className="w-full px-3 py-2 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-accent-500 focus:border-transparent" />
+            <div className="mt-3">
+              <PhotoEditor photos={photos} onChange={onPhotos} required={requirePhoto} onPreview={onPreview} />
+            </div>
+          </div>
+        );
+      }
+      function FindingItemEditor({ description, onDescription, photos, onPhotos, templates, onPreview }) {
+        return (
+          <>
+            <span className="text-xs font-medium text-gray-600 mb-1 block">Description</span>
+            <textarea value={description}
+                      onChange={e => onDescription(e.target.value)}
+                      rows={2}
+                      placeholder="Describe this finding…"
+                      className="w-full px-3 py-2 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-accent-500 focus:border-transparent bg-white" />
+            <div className="mt-3">
+              <PhotoEditor photos={photos} onChange={onPhotos} required={true} onPreview={onPreview} />
+            </div>
+          </>
+        );
+      }
+
+      function FindingCard({ index, card, onChange, onRemove, onPreview,
+                             onDragStartCard, onDragOverCard, onDragEndCard }) {
+        const [draggable, setDraggable] = useState(false);
+        const isGood = card.entryType === 'good';
+        const hasMulti = !isGood && card.findings && card.findings.length > 0;
+
+        function update(patch) { onChange({ ...card, ...patch }); }
+        function setEntryType(t) {
+          if (t === 'good') update({ entryType: 'good', findings: [] });
+          else update({ entryType: 'finding' });
+        }
+        function setPhotos(photos) { update({ photos }); }
+        function addAdditionalFinding() {
+          let findings = card.findings, patch = {};
+          if (!findings || findings.length === 0) {
+            findings = [{ id: newId(), description: card.description || '', photos: card.photos || [] }];
+            patch = { description: '', photos: [] };
+          }
+          update({ ...patch, findings: [...findings, newFinding()] });
+        }
+        function updateFinding(fid, patch) {
+          update({ findings: card.findings.map(f => f.id === fid ? { ...f, ...patch } : f) });
+        }
+        function removeFinding(fid) {
+          let findings = card.findings.filter(f => f.id !== fid);
+          if (findings.length === 1) {
+            const only = findings[0];
+            update({ findings: [], description: only.description, photos: only.photos });
+          } else {
+            update({ findings });
+          }
+        }
+
+        return (
+          <div className="bg-white rounded-lg border border-gray-200 shadow-sm"
+               draggable={draggable}
+               onDragStart={onDragStartCard}
+               onDragOver={onDragOverCard}
+               onDragEnd={() => { setDraggable(false); onDragEndCard(); }}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50 rounded-t-lg">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="cursor-grab text-gray-400 select-none px-1 text-lg leading-none"
+                      title="Drag to reorder card"
+                      onMouseDown={() => setDraggable(true)}
+                      onMouseUp={() => setDraggable(false)}
+                      onMouseLeave={() => setDraggable(false)}>≡</span>
+                <span className="text-sm font-medium text-gray-700">Card {index + 1}</span>
+                <EntryTypeToggle value={card.entryType} onChange={setEntryType} />
+                <CategorySelect value={card.category} onChange={cat => update({ category: cat })} />
+              </div>
+              <button onClick={onRemove} className="text-sm text-red-500 hover:underline">Delete</button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Work Activity</label>
+                <input type="text" value={card.workActivity}
+                       onChange={e => update({ workActivity: e.target.value })}
+                       placeholder="e.g. Working at Height"
+                       className="w-full px-3 py-2 border border-gray-300 rounded text-sm focus:ring-2 focus:ring-accent-500 focus:border-transparent" />
+              </div>
+
+              {isGood && (
+                <SingleEntryEditor
+                  label="Observation"
+                  description={card.description}
+                  onDescription={(v) => update({ description: v })}
+                  templates={GOOD_OBSERVATION_TEMPLATES}
+                  photos={card.photos}
+                  onPhotos={setPhotos}
+                  requirePhoto={false}
+                  onPreview={onPreview} />
+              )}
+              {!isGood && !hasMulti && (
+                <SingleEntryEditor
+                  label="Finding"
+                  description={card.description}
+                  onDescription={(v) => update({ description: v })}
+                  templates={FINDING_TEMPLATES}
+                  photos={card.photos}
+                  onPhotos={setPhotos}
+                  requirePhoto={true}
+                  onPreview={onPreview} />
+              )}
+              {!isGood && hasMulti && (
+                <div className="space-y-3">
+                  {card.findings.map((f, j) => (
+                    <div key={f.id} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-medium text-gray-600">Finding {j + 1} of {card.findings.length}</span>
+                        <button onClick={() => removeFinding(f.id)} className="text-xs text-red-500 hover:underline">Remove</button>
+                      </div>
+                      <FindingItemEditor
+                        description={f.description}
+                        onDescription={(v) => updateFinding(f.id, { description: v })}
+                        photos={f.photos}
+                        onPhotos={(photos) => updateFinding(f.id, { photos })}
+                        templates={FINDING_TEMPLATES}
+                        onPreview={onPreview} />
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!isGood && (
+                <button onClick={addAdditionalFinding}
+                        className="px-3 py-1.5 rounded border border-dashed border-gray-300 text-sm text-gray-600 hover:bg-gray-50">
+                  + Add Another Finding under this Work Activity
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      // ============================================================
+      // SECTIONS / HEADER / APP ROOT
+      // ============================================================
+      function Field({ label, hint, children }) {
+        return (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+            {children}
+            {hint && <p className="text-xs text-gray-400 mt-1">{hint}</p>}
+          </div>
+        );
+      }
+
+      function SectionCard({ title, subtitle, children, num }) {
+        return (
+          <section className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
+              <div className="flex items-center gap-3">
+                {num && <span className="w-7 h-7 rounded-full bg-accent-600 text-white text-sm font-medium flex items-center justify-center">{num}</span>}
+                <div>
+                  <h2 className="font-semibold text-gray-900">{title}</h2>
+                  {subtitle && <p className="text-xs text-gray-500">{subtitle}</p>}
+                </div>
+              </div>
+            </div>
+            <div className="p-6">{children}</div>
+          </section>
+        );
+      }
+
+      function Header({ savedAt, onBackup, onRestore, onFresh }) {
+        const restoreInputRef = useRef();
+        return (
+          <header className="bg-white border-b border-gray-200 px-6 py-3">
+            <div className="max-w-5xl mx-auto flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <h1 className="font-semibold text-lg text-gray-800">QESH Inspection Builder</h1>
+                <p className="text-xs text-gray-500">Draft saved locally · {formatTime(savedAt)}</p>
+              </div>
+              <div className="flex items-center gap-2 text-sm">
+                <button onClick={onBackup} className="px-3 py-1.5 rounded border border-gray-300 bg-white hover:bg-gray-50">
+                  Download backup
+                </button>
+                <button onClick={() => restoreInputRef.current?.click()}
+                        className="px-3 py-1.5 rounded border border-gray-300 bg-white hover:bg-gray-50">
+                  Restore backup
+                </button>
+                <input ref={restoreInputRef} type="file" accept="application/json"
+                       onChange={e => { if (e.target.files?.[0]) onRestore(e.target.files[0]); e.target.value = ''; }}
+                       className="hidden" />
+                <button onClick={onFresh}
+                        className="px-3 py-1.5 rounded border border-red-200 bg-white text-red-600 hover:bg-red-50">
+                  Start fresh
+                </button>
+              </div>
+            </div>
+          </header>
+        );
+      }
+
+      function ReportInfoSection({ report, onUpdate }) {
+        return (
+          <SectionCard num={1} title="Report Info" subtitle="These fields populate the cover page.">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              <Field label="Inspection Date *" hint="Used in file name and report header.">
+                <input type="date" value={report.inspectionDate}
+                       onChange={e => onUpdate('inspectionDate', e.target.value)}
+                       className="w-full px-3 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-accent-500 focus:border-transparent" />
+              </Field>
+              <Field label="Project Name *">
+                <input type="text" value={report.projectName}
+                       onChange={e => onUpdate('projectName', e.target.value)}
+                       placeholder="e.g. New Sunway Hotel Seberang Jaya"
+                       className="w-full px-3 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-accent-500 focus:border-transparent" />
+              </Field>
+              <Field label="Contractor Name">
+                <input type="text" value={report.contractorName}
+                       onChange={e => onUpdate('contractorName', e.target.value)}
+                       placeholder="e.g. Acme Builders Sdn Bhd"
+                       className="w-full px-3 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-accent-500 focus:border-transparent" />
+              </Field>
+              <Field label="Conclusion" hint="Appears as the last row of the report.">
+                <textarea value={report.conclusion}
+                          onChange={e => onUpdate('conclusion', e.target.value)}
+                          rows={3}
+                          placeholder="Overall conclusion of this inspection…"
+                          className="w-full px-3 py-2 border border-gray-300 rounded focus:ring-2 focus:ring-accent-500 focus:border-transparent" />
+              </Field>
+            </div>
+          </SectionCard>
+        );
+      }
+
+      function FindingsSection({ cards, onUpdate, onRemove, onAdd, onPreview,
+                                 onDragStart, onDragOver, onDragEnd }) {
+        return (
+          <SectionCard num={2} title="Findings" subtitle="Add findings and good observations. Drag cards to reorder.">
+            <div className="space-y-4">
+              {cards.length === 0 && (
+                <p className="text-gray-500 text-sm text-center py-6">No cards yet. Add your first one below.</p>
+              )}
+              {cards.map((card, i) => (
+                <FindingCard key={card.cardId}
+                             index={i}
+                             card={card}
+                             onChange={(next) => onUpdate(card.cardId, next)}
+                             onRemove={() => onRemove(card.cardId)}
+                             onPreview={onPreview}
+                             onDragStartCard={() => onDragStart(i)}
+                             onDragOverCard={(e) => onDragOver(e, i)}
+                             onDragEndCard={onDragEnd} />
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2 mt-5">
+              <button onClick={() => onAdd('finding')}
+                      className="px-4 py-2 rounded bg-accent-600 hover:bg-accent-700 text-white text-sm font-medium">
+                + Add Finding
+              </button>
+              <button onClick={() => onAdd('good')}
+                      className="px-4 py-2 rounded border border-gray-300 bg-white hover:bg-gray-50 text-sm">
+                + Add Good Observation
+              </button>
+            </div>
+          </SectionCard>
+        );
+      }
+
+      function ExportSection({ report, errors, exporting, onExport }) {
+        const filename = buildFilename(report);
+        const ready = report.inspectionDate && report.projectName?.trim() && report.cards?.length > 0;
+        return (
+          <SectionCard num={3} title="Export" subtitle="Download a Word document. Polish in Word as needed before sending.">
+            <p className="text-sm text-gray-600 mb-1">File name:</p>
+            <p className="font-mono text-base text-gray-900 mb-5 break-all">{filename}.docx</p>
+            <button onClick={onExport} disabled={exporting || !ready}
+                    className="px-5 py-2.5 rounded bg-accent-600 hover:bg-accent-700 text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+              {exporting ? 'Generating…' : '⬇ Download .docx'}
+            </button>
+            {!ready && (
+              <p className="text-xs text-gray-500 mt-2">Fill in date, project name, and at least one card to enable export.</p>
+            )}
+            {errors.length > 0 && (
+              <div className="mt-4 p-4 rounded border border-red-200 bg-red-50 text-red-700 text-sm">
+                <p className="font-medium mb-1">Cannot export:</p>
+                <ul className="list-disc list-inside space-y-1">
+                  {errors.map((e, i) => <li key={i}>{e}</li>)}
+                </ul>
+              </div>
+            )}
+          </SectionCard>
+        );
+      }
+
+      function App() {
+        const [report, setReport] = useState(loadReport);
+        const [savedAt, setSavedAt] = useState(Date.now());
+        const [previewPhotoId, setPreviewPhotoId] = useState(null);
+        const [exporting, setExporting] = useState(false);
+        const [errors, setErrors] = useState([]);
+
+        useEffect(() => {
+          saveReport(report);
+          setSavedAt(Date.now());
+        }, [report]);
+
+        useEffect(() => {
+          gcOrphanPhotos(report).catch(console.error);
+          // eslint-disable-next-line react-hooks/exhaustive-deps
+        }, []);
+
+        function updateField(name, value) { setReport(r => ({ ...r, [name]: value })); }
+        function updateCard(cardId, nextCard) {
+          setReport(r => ({ ...r, cards: r.cards.map(c => c.cardId === cardId ? nextCard : c) }));
+        }
+        function removeCard(cardId) {
+          if (!confirm('Delete this card?')) return;
+          setReport(r => {
+            const card = r.cards.find(c => c.cardId === cardId);
+            if (card) collectCardPhotoIds(card).forEach(id => deletePhoto(id));
+            return { ...r, cards: r.cards.filter(c => c.cardId !== cardId) };
+          });
+        }
+        function addCard(entryType) {
+          setReport(r => ({ ...r, cards: [...r.cards, newCard(entryType)] }));
+        }
+
+        const dragIdx = useRef(null);
+        function onCardDragStart(idx) { dragIdx.current = idx; }
+        function onCardDragOver(e, idx) {
+          e.preventDefault();
+          if (dragIdx.current === null || dragIdx.current === idx) return;
+          setReport(r => {
+            const next = [...r.cards];
+            const [moved] = next.splice(dragIdx.current, 1);
+            next.splice(idx, 0, moved);
+            dragIdx.current = idx;
+            return { ...r, cards: next };
+          });
+        }
+        function onCardDragEnd() { dragIdx.current = null; }
+
+        async function handleExport() {
+          const errs = validate(report);
+          if (errs.length) { setErrors(errs); return; }
+          setErrors([]); setExporting(true);
+          try {
+            const blob = await generateDocxBlob(report);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = buildFilename(report) + '.docx';
+            document.body.appendChild(a); a.click(); a.remove();
+            URL.revokeObjectURL(url);
+          } catch (e) {
+            console.error(e);
+            setErrors(['Export failed: ' + e.message]);
+          } finally {
+            setExporting(false);
+          }
+        }
+
+        async function downloadBackup() {
+          const json = await exportBackup(report);
+          const blob = new Blob([json], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `qesh-backup-${new Date().toISOString().slice(0,10)}.json`;
+          document.body.appendChild(a); a.click(); a.remove();
+          URL.revokeObjectURL(url);
+        }
+        async function uploadBackup(file) {
+          if (!confirm('Restoring will replace your current work. Continue?')) return;
+          try {
+            const text = await file.text();
+            const restored = await importBackup(text);
+            setReport(restored);
+          } catch (e) {
+            alert('Could not restore backup: ' + e.message);
+          }
+        }
+        async function startFresh() {
+          if (!confirm('Start a new report? Current work will be deleted.')) return;
+          await wipeAll();
+          setReport(loadReport());
+        }
+
+        return (
+          <div className="min-h-screen flex flex-col">
+            <Header savedAt={savedAt}
+                    onBackup={downloadBackup}
+                    onRestore={uploadBackup}
+                    onFresh={startFresh} />
+            <main className="flex-1 max-w-5xl mx-auto w-full p-6 pb-24 space-y-8">
+              <ReportInfoSection report={report} onUpdate={updateField} />
+              <FindingsSection
+                cards={report.cards}
+                onUpdate={updateCard}
+                onRemove={removeCard}
+                onAdd={addCard}
+                onPreview={setPreviewPhotoId}
+                onDragStart={onCardDragStart}
+                onDragOver={onCardDragOver}
+                onDragEnd={onCardDragEnd} />
+              <ExportSection
+                report={report}
+                errors={errors}
+                exporting={exporting}
+                onExport={handleExport} />
+            </main>
+            {previewPhotoId && (
+              <PhotoLightbox photoId={previewPhotoId} onClose={() => setPreviewPhotoId(null)} />
+            )}
+          </div>
+        );
+      }
+
+      // Hide splash and mount the app
+      const splash = document.getElementById('boot-splash');
+      if (splash) splash.classList.add('hidden');
+      const root = createRoot(document.getElementById('root'));
+      root.render(<App />);
+    });
+  </script>
+</body>
+</html>
