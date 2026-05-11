@@ -337,7 +337,7 @@
       // ask them to hit Ctrl+Shift+R to force a fresh load.
       //
       // Just increment by 1 for each update (v1 → v2 → v3, etc.).
-      const APP_VERSION = '1';
+      const APP_VERSION = '2';
 
       // ============================================================
       // DOCX GENERATION — calibrated against the real Sunway template
@@ -511,15 +511,20 @@
                    })] }),
             cell({ width: COL_LOGO_RIGHT_PCT,
                    verticalAlign: VerticalAlign.CENTER,
-                   children: [P({ text: CLIENT_NAME, bold: true, align: AlignmentType.CENTER })] }),
+                   children: [new Paragraph({
+                     alignment: AlignmentType.CENTER,
+                     spacing: { before: 0, after: 0 },
+                     // Client name in 18pt (size 36 = half-points) bold.
+                     children: [new TextRun({ text: CLIENT_NAME, bold: true, font: FONT, size: 36 })]
+                   })] }),
           ]
         })]);
 
         const title = new Paragraph({
           alignment: AlignmentType.CENTER,
           spacing: { before: 240, after: 240 },
-          children: [new TextRun({ text: 'COE - QESH INSPECTION REPORT', bold: true, font: FONT, size: 28 })]
-          // size 28 = 14pt for the title (was 16pt; template uses ~14pt)
+          // Title in 16pt (size 32 = half-points) bold.
+          children: [new TextRun({ text: 'COE - QESH INSPECTION REPORT', bold: true, font: FONT, size: 32 })]
         });
 
         // Info table — 2 rows total:
@@ -814,26 +819,74 @@
       function PhotoEditor({ photos, onChange, onPreview, required }) {
         const [busy, setBusy] = useState(false);
         const [err, setErr] = useState(null);
+        const [isDropTarget, setIsDropTarget] = useState(false);
         const dragIdx = useRef(null);
+        // dragenter/leave bubble through children, so we count enter/leave
+        // events to know when the cursor has truly left the drop zone.
+        const dragCounter = useRef(0);
 
         async function handleFiles(fileList) {
           const files = Array.from(fileList || []);
           if (!files.length) return;
           setBusy(true); setErr(null);
           const added = [];
+          const skipped = [];
           try {
             for (const f of files) {
+              // Filter to JPEG/PNG only — drag-and-drop can drop anything
+              if (!/^image\/(jpe?g|png)$/i.test(f.type)) {
+                skipped.push(f.name);
+                continue;
+              }
               try {
                 const { blob, width, height } = await processPhoto(f);
                 const photoId = await putPhoto(blob);
                 added.push({ photoId, width, height });
               } catch (e) {
                 console.error('photo failed:', f.name, e);
-                setErr(`Skipped "${f.name}": ${e.message}`);
+                skipped.push(f.name);
               }
             }
             if (added.length) onChange([...(photos || []), ...added]);
+            if (skipped.length) {
+              setErr(`Skipped (not JPEG/PNG): ${skipped.slice(0, 3).join(', ')}${skipped.length > 3 ? `, +${skipped.length - 3} more` : ''}`);
+            }
           } finally { setBusy(false); }
+        }
+
+        // ---- External file drop handling (dragging files from OS) ----
+        // Distinguish from internal thumbnail-reorder drags by checking
+        // dataTransfer.types — file drags have 'Files' in their types array.
+        function isExternalFileDrag(e) {
+          return e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.indexOf('Files') !== -1;
+        }
+        function onContainerDragEnter(e) {
+          if (!isExternalFileDrag(e)) return;
+          e.preventDefault();
+          dragCounter.current++;
+          setIsDropTarget(true);
+        }
+        function onContainerDragLeave(e) {
+          if (!isExternalFileDrag(e)) return;
+          dragCounter.current--;
+          if (dragCounter.current <= 0) {
+            dragCounter.current = 0;
+            setIsDropTarget(false);
+          }
+        }
+        function onContainerDragOver(e) {
+          if (!isExternalFileDrag(e)) return;
+          // preventDefault is required for drop to fire
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+        }
+        function onContainerDrop(e) {
+          if (!isExternalFileDrag(e)) return;
+          e.preventDefault();
+          dragCounter.current = 0;
+          setIsDropTarget(false);
+          const files = e.dataTransfer.files;
+          if (files && files.length) handleFiles(files);
         }
 
         function removeAt(idx) {
@@ -841,6 +894,7 @@
           if (ph?.photoId) deletePhoto(ph.photoId);
           onChange(photos.filter((_, i) => i !== idx));
         }
+        // ---- Internal reorder (thumbnail drag within the grid) ----
         function onDragStart(idx) { dragIdx.current = idx; }
         function onDragOver(e, idx) {
           e.preventDefault();
@@ -854,8 +908,16 @@
         function onDragEnd() { dragIdx.current = null; }
 
         const empty = !photos || photos.length === 0;
+        const dropZoneClass = isDropTarget
+          ? 'border-2 border-dashed border-accent-500 bg-accent-50 rounded-lg p-3 transition-colors'
+          : 'border-2 border-dashed border-transparent rounded-lg p-3 transition-colors';
+
         return (
-          <div>
+          <div className={dropZoneClass}
+               onDragEnter={onContainerDragEnter}
+               onDragLeave={onContainerDragLeave}
+               onDragOver={onContainerDragOver}
+               onDrop={onContainerDrop}>
             <div className="flex items-center gap-2 mb-2 flex-wrap">
               <label className="px-3 py-1.5 rounded border border-gray-300 bg-white text-sm cursor-pointer hover:bg-gray-50 inline-flex items-center gap-1">
                 <span>📷</span> {busy ? 'Processing…' : 'Add photos'}
@@ -863,12 +925,21 @@
                        onChange={e => { handleFiles(e.target.files); e.target.value = ''; }}
                        className="hidden" disabled={busy} />
               </label>
-              <span className="text-xs text-gray-500">JPEG / PNG — auto-resized, EXIF stripped, drag to reorder</span>
+              <span className="text-xs text-gray-500">
+                {isDropTarget
+                  ? 'Drop files here to add'
+                  : 'JPEG / PNG — click to browse or drag files here, drag thumbnails to reorder'}
+              </span>
             </div>
             {err && <div className="mb-2 text-xs text-red-600">{err}</div>}
-            {required && empty && (
+            {required && empty && !isDropTarget && (
               <div className="mb-2 p-2 rounded border border-red-200 bg-red-50 text-red-600 text-xs">
                 ⚠ At least one photo is required for findings.
+              </div>
+            )}
+            {empty && !isDropTarget && (
+              <div className="text-center text-xs text-gray-400 py-4 border border-dashed border-gray-200 rounded">
+                Drop photos here, or click "Add photos" above
               </div>
             )}
             {!empty && (
