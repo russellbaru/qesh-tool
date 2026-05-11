@@ -337,7 +337,7 @@
       // ask them to hit Ctrl+Shift+R to force a fresh load.
       //
       // Just increment by 1 for each update (v1 → v2 → v3, etc.).
-      const APP_VERSION = '2';
+      const APP_VERSION = '3';
 
       // ============================================================
       // DOCX GENERATION — calibrated against the real Sunway template
@@ -855,10 +855,18 @@
         }
 
         // ---- External file drop handling (dragging files from OS) ----
-        // Distinguish from internal thumbnail-reorder drags by checking
-        // dataTransfer.types — file drags have 'Files' in their types array.
+        // We detect an external file drag by checking dataTransfer.types for
+        // 'Files'. The drop handler additionally checks dataTransfer.files
+        // before processing — belt and suspenders against edge cases where
+        // an internal drag's bubble-up reaches the container.
         function isExternalFileDrag(e) {
-          return e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.indexOf('Files') !== -1;
+          if (!e.dataTransfer || !e.dataTransfer.types) return false;
+          // DataTransferItemList is array-like; check via includes / indexOf
+          const types = e.dataTransfer.types;
+          for (let i = 0; i < types.length; i++) {
+            if (types[i] === 'Files') return true;
+          }
+          return false;
         }
         function onContainerDragEnter(e) {
           if (!isExternalFileDrag(e)) return;
@@ -886,7 +894,10 @@
           dragCounter.current = 0;
           setIsDropTarget(false);
           const files = e.dataTransfer.files;
-          if (files && files.length) handleFiles(files);
+          // Extra guard: only process if there are actually files. An internal
+          // thumbnail drag could theoretically still bubble up here in some
+          // browsers, and we don't want to misinterpret it as "0 files dropped".
+          if (files && files.length > 0) handleFiles(files);
         }
 
         function removeAt(idx) {
@@ -895,17 +906,42 @@
           onChange(photos.filter((_, i) => i !== idx));
         }
         // ---- Internal reorder (thumbnail drag within the grid) ----
-        function onDragStart(idx) { dragIdx.current = idx; }
-        function onDragOver(e, idx) {
+        // These handlers stopPropagation so the events don't bubble up to the
+        // container's drop handler — without this, dropping a thumbnail back
+        // into the grid would be treated as an external file drop and the
+        // photo would get duplicated.
+        function onThumbDragStart(e, idx) {
+          e.stopPropagation();
+          dragIdx.current = idx;
+          // Tell the browser this is a move operation (not a copy), which
+          // also keeps the drag-image semantics tidy.
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+        }
+        function onThumbDragOver(e, idx) {
+          // Only handle this as a reorder if an internal drag is in progress.
+          // If a file drag from the OS is happening over a thumbnail, let it
+          // bubble up to the container so it gets processed as a file drop.
+          if (dragIdx.current === null) return;
           e.preventDefault();
-          if (dragIdx.current === null || dragIdx.current === idx) return;
+          e.stopPropagation();
+          if (dragIdx.current === idx) return;
           const next = [...photos];
           const [moved] = next.splice(dragIdx.current, 1);
           next.splice(idx, 0, moved);
           dragIdx.current = idx;
           onChange(next);
         }
-        function onDragEnd() { dragIdx.current = null; }
+        function onThumbDrop(e) {
+          // Only swallow the drop if it's an internal reorder. Otherwise let
+          // it bubble to the container (which handles external file drops).
+          if (dragIdx.current === null) return;
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        function onThumbDragEnd(e) {
+          if (e) e.stopPropagation();
+          dragIdx.current = null;
+        }
 
         const empty = !photos || photos.length === 0;
         const dropZoneClass = isDropTarget
@@ -948,9 +984,10 @@
                   <div key={ph.photoId}
                        className="relative group border border-gray-200 rounded overflow-hidden bg-gray-50"
                        draggable
-                       onDragStart={() => onDragStart(idx)}
-                       onDragOver={e => onDragOver(e, idx)}
-                       onDragEnd={onDragEnd}>
+                       onDragStart={e => onThumbDragStart(e, idx)}
+                       onDragOver={e => onThumbDragOver(e, idx)}
+                       onDrop={onThumbDrop}
+                       onDragEnd={onThumbDragEnd}>
                     <PhotoThumb photoId={ph.photoId}
                                 className="w-full h-24 object-cover cursor-pointer block"
                                 onClick={() => onPreview && onPreview(ph.photoId)} />
